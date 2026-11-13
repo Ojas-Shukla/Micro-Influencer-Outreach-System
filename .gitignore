@@ -5,6 +5,10 @@ __pycache__/
 
 # Environment variables
 .env
+.secrets/
+client_secret*.json
+google-oauth-client*.json
+gmail-token*.json
 
 # Database
 *.db

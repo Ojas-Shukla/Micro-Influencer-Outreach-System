@@ -1,4 +1,5 @@
 import json
+from datetime import datetime, timezone
 
 import pytest
 from fastapi.testclient import TestClient
@@ -10,6 +11,7 @@ from app.db.base import Base
 from app.db.models import Campaign, Influencer, OutreachMessage
 from app.db.session import get_db
 from app.main import app
+from app.services.outreach.exceptions import OutreachConfigurationError
 
 VALID_RESPONSE = {
     "email_subject": "Jane, let's talk yoga and collaboration",
@@ -36,6 +38,15 @@ class StubProvider:
 
     def generate(self, system_prompt, user_prompt):
         return json.dumps(VALID_RESPONSE)
+
+
+class StubGmailSender:
+    def __init__(self):
+        self.calls = []
+
+    def send(self, recipient, subject, body):
+        self.calls.append((recipient, subject, body))
+        return "gmail-message-id"
 
 
 @pytest.fixture
@@ -135,3 +146,88 @@ def test_generation_route_rejects_unsupported_campaign_niche(api_client):
 
     assert response.status_code == 400
     assert "fitness" in response.json()["detail"]
+
+
+def test_dry_run_and_send_routes_require_approval_and_log_outcomes(
+    api_client,
+    monkeypatch,
+):
+    client, test_session = api_client
+    with test_session() as db:
+        influencer = db.get(Influencer, 1)
+        influencer.email = "jane@example.com"
+        message = OutreachMessage(
+            campaign_id=1,
+            influencer_id=1,
+            channel="email",
+            subject="Collaboration invitation",
+            body=VALID_RESPONSE["email_body"],
+            status="approved",
+            approved_at=datetime.now(timezone.utc),
+        )
+        db.add(message)
+        db.commit()
+        message_id = message.id
+
+    sender = StubGmailSender()
+    monkeypatch.setattr(
+        "app.services.outreach.service._create_gmail_sender",
+        lambda: sender,
+    )
+
+    dry_run = client.post(f"/outreach/{message_id}/dry-run")
+    assert dry_run.status_code == 200
+    assert dry_run.json()["status"] == "dry_run"
+    assert sender.calls == []
+
+    sent = client.post(f"/outreach/{message_id}/send")
+    assert sent.status_code == 200
+    assert sent.json()["status"] == "sent"
+    assert sender.calls[0][0] == "jane@example.com"
+
+    duplicate = client.post(f"/outreach/{message_id}/send")
+    assert duplicate.status_code == 409
+
+    logs = client.get("/outreach/logs")
+    assert logs.status_code == 200
+    assert {log["event_type"] for log in logs.json()} >= {
+        "dry_run",
+        "send_started",
+        "sent",
+        "duplicate_blocked",
+    }
+
+
+def test_send_route_reports_disabled_gmail_configuration(
+    api_client,
+    monkeypatch,
+):
+    client, test_session = api_client
+    with test_session() as db:
+        influencer = db.get(Influencer, 1)
+        influencer.email = "jane@example.com"
+        message = OutreachMessage(
+            campaign_id=1,
+            influencer_id=1,
+            channel="email",
+            subject="Invitation",
+            body="Hello",
+            status="approved",
+            approved_at=datetime.now(timezone.utc),
+        )
+        db.add(message)
+        db.commit()
+        message_id = message.id
+
+    def disabled_gmail():
+        raise OutreachConfigurationError("Real email is disabled.")
+
+    monkeypatch.setattr(
+        "app.services.outreach.service._create_gmail_sender",
+        disabled_gmail,
+    )
+
+    response = client.post(f"/outreach/{message_id}/send")
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "Real email is disabled."
