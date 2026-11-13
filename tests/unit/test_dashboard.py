@@ -1,175 +1,124 @@
-import pytest
-from sqlalchemy import create_engine, select
-from sqlalchemy.orm import Session, sessionmaker
-from sqlalchemy.pool import StaticPool
+from types import SimpleNamespace
 
-from app.db.base import Base
-from app.db.models import (
-    Campaign,
-    Influencer,
-    OutreachLog,
-    OutreachMessage,
-)
-from app.services.outreach.exceptions import DuplicateOutreachError
 from dashboard import data
 
 
-@pytest.fixture
-def dashboard_db(monkeypatch):
-    engine = create_engine(
-        "sqlite://",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
-    Base.metadata.create_all(engine)
-    test_session = sessionmaker(bind=engine, class_=Session)
-    monkeypatch.setattr(data, "SessionLocal", test_session)
-    yield test_session
-    Base.metadata.drop_all(engine)
-    engine.dispose()
+class StubResponse:
+    def __init__(self, value):
+        self.value = value
+        self.content = b"exported,csv\n"
+
+    def json(self):
+        return self.value
 
 
-def test_csv_import_reports_imports_duplicates_and_invalid_rows(
-    dashboard_db,
-):
-    report = data.import_csv_content(
-        b"platform,username,display_name,bio,followers_count\n"
-        b"youtube,janedoe,Jane Doe,Yoga workouts,25000\n"
-        b"youtube,janedoe,Jane Doe,Yoga workouts,25000\n"
-        b",missing,Missing platform,Yoga,10000\n"
-    )
+def test_authenticated_request_sends_configured_bearer_token(monkeypatch):
+    token = "dashboard-client-test-token-with-32-characters"
+    monkeypatch.setenv("DASHBOARD_API_TOKEN", token)
+    observed = {}
 
-    assert report == {
-        "total_rows": 3,
-        "imported": 1,
-        "duplicates": 1,
-        "invalid": 1,
-        "errors": [{"row": 4, "error": "Platform is required"}],
+    class HttpResponse:
+        is_success = True
+        text = ""
+        content = b""
+
+        def json(self):
+            return {"status": "healthy"}
+
+    def fake_http_request(method, url, *, headers, **kwargs):
+        observed.update(method=method, url=url, headers=headers)
+        return HttpResponse()
+
+    monkeypatch.setattr(data.httpx, "request", fake_http_request)
+
+    response = data._request("GET", "/health")
+
+    assert response.json() == {"status": "healthy"}
+    assert observed["headers"]["Authorization"] == f"Bearer {token}"
+
+
+def test_list_influencers_maps_api_profiles_and_qualification(monkeypatch):
+    profile = {
+        "id": 7,
+        "platform": "youtube",
+        "username": "fit_jane",
+        "display_name": "Jane",
+        "followers_count": 25000,
+        "qualification": {
+            "overall_status": "accepted",
+            "filter_reasons": [],
+            "niche_reason": "Fitness content",
+        },
     }
+    calls = []
 
-    with dashboard_db() as db:
-        creators = db.scalars(select(Influencer)).all()
-    assert len(creators) == 1
-    assert creators[0].username == "janedoe"
+    def fake_request(method, path, *, params=None, **kwargs):
+        calls.append((method, path, params))
+        return StubResponse([profile])
 
+    monkeypatch.setattr(data, "_request", fake_request)
 
-@pytest.mark.parametrize(
-    ("content", "message"),
-    [
-        (b"not,csv\n1,2\n", "platform and username"),
-        (b"\xff\xfe", "UTF-8"),
-    ],
-)
-def test_csv_import_rejects_bad_files(dashboard_db, content, message):
-    with pytest.raises(ValueError, match=message):
-        data.import_csv_content(content)
+    rows = data.list_influencers(search=" jane ", platform="youtube")
 
-
-def test_influencer_browser_shows_qualification_and_export(dashboard_db):
-    with dashboard_db() as db:
-        db.add_all(
-            (
-                Influencer(
-                    platform="youtube",
-                    username="janedoe",
-                    display_name="Jane Doe",
-                    bio="Yoga and fitness workouts",
-                    followers_count=25_000,
-                ),
-                Influencer(
-                    platform="instagram",
-                    username="traveler",
-                    display_name="Travel Creator",
-                    bio="Travel videos",
-                    followers_count=25_000,
-                ),
-            )
+    assert len(rows) == 1
+    creator, qualification = rows[0]
+    assert isinstance(creator, SimpleNamespace)
+    assert creator.username == "fit_jane"
+    assert qualification["overall_status"] == "accepted"
+    assert calls == [
+        (
+            "GET",
+            "/influencers",
+            {"limit": 500, "search": "jane", "platform": "youtube"},
         )
-        db.commit()
+    ]
 
-    qualified = data.list_influencers(
-        search="jane",
-        platform="youtube",
+
+def test_campaign_creation_uses_fitness_api_payload(monkeypatch):
+    calls = []
+
+    def fake_request(method, path, *, json=None, **kwargs):
+        calls.append((method, path, json))
+        return StubResponse({"id": 12})
+
+    monkeypatch.setattr(data, "_request", fake_request)
+
+    campaign_id = data.create_campaign(
+        "  Summer Move  ",
+        "fitness",
+        "  Accessible movement  ",
     )
-    assert len(qualified) == 1
-    assert qualified[0][1]["overall_status"] == "accepted"
-    exported_usernames = {
-        row["username"] for row in data.influencers_export_rows()
-    }
-    assert exported_usernames == {"janedoe", "traveler"}
 
-
-def test_manual_dm_sent_is_recorded_and_duplicate_blocked(dashboard_db):
-    with dashboard_db() as db:
-        campaign = Campaign(name="Fitness launch", niche="fitness")
-        influencer = Influencer(
-            platform="youtube",
-            username="janedoe",
-            display_name="Jane Doe",
+    assert campaign_id == 12
+    assert calls == [
+        (
+            "POST",
+            "/campaigns",
+            {
+                "name": "Summer Move",
+                "niche": "fitness",
+                "description": "Accessible movement",
+            },
         )
-        db.add_all((campaign, influencer))
-        db.flush()
-        message = OutreachMessage(
-            campaign_id=campaign.id,
-            influencer_id=influencer.id,
-            channel="instagram_dm",
-            body="Hi Jane, your yoga workouts look great.",
-            status="approved",
+    ]
+
+
+def test_reconciliation_sends_explicit_confirmation(monkeypatch):
+    calls = []
+
+    def fake_request(method, path, *, json=None, **kwargs):
+        calls.append((method, path, json))
+        return StubResponse({"id": 5, "status": "approved"})
+
+    monkeypatch.setattr(data, "_request", fake_request)
+
+    response = data.reconcile_delivery(5, confirmed_not_sent=True)
+
+    assert response.status == "approved"
+    assert calls == [
+        (
+            "POST",
+            "/outreach/5/reconcile",
+            {"confirmed_not_sent": True},
         )
-        from datetime import datetime, timezone
-
-        message.approved_at = datetime.now(timezone.utc)
-        db.add(message)
-        db.commit()
-        message_id = message.id
-
-    sent = data.mark_dm_sent(message_id)
-    assert sent.status == "sent"
-
-    with pytest.raises(DuplicateOutreachError):
-        data.mark_dm_sent(message_id)
-
-    with dashboard_db() as db:
-        events = db.scalars(
-            select(OutreachLog.event_type).order_by(OutreachLog.id)
-        ).all()
-    assert events == ["manual_dm_sent", "duplicate_blocked"]
-
-
-def test_draft_edits_are_logged_and_approved_messages_are_locked(
-    dashboard_db,
-):
-    with dashboard_db() as db:
-        campaign = Campaign(name="Fitness launch", niche="fitness")
-        influencer = Influencer(platform="youtube", username="janedoe")
-        db.add_all((campaign, influencer))
-        db.flush()
-        message = OutreachMessage(
-            campaign_id=campaign.id,
-            influencer_id=influencer.id,
-            channel="email",
-            subject="Original subject",
-            body="Original body",
-            status="draft",
-        )
-        db.add(message)
-        db.commit()
-        message_id = message.id
-
-    updated = data.update_draft(
-        message_id,
-        "Updated subject",
-        "Updated message body",
-    )
-    assert updated.subject == "Updated subject"
-    assert updated.body == "Updated message body"
-
-    with dashboard_db() as db:
-        log = db.scalar(
-            select(OutreachLog).where(OutreachLog.event_type == "edited")
-        )
-        db.get(OutreachMessage, message_id).status = "approved"
-        db.commit()
-    assert log is not None
-    with pytest.raises(ValueError, match="Only draft"):
-        data.update_draft(message_id, "New subject", "New body")
+    ]

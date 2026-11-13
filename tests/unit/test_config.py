@@ -1,3 +1,5 @@
+import pytest
+
 from app.core.config import Settings
 
 
@@ -47,3 +49,33 @@ def test_settings_keep_safe_default_configuration():
     assert settings.allow_real_email_send is False
     assert settings.database_url == "sqlite:///./data/micro_influencer.db"
     assert settings.llm_provider == "groq"
+
+
+def test_dashboard_login_is_required_outside_development_and_for_live_email():
+    assert Settings(
+        _env_file=None,
+        app_env="development",
+        email_mode="dry_run",
+    ).dashboard_login_required is False
+    assert Settings(
+        _env_file=None,
+        app_env="production",
+    ).dashboard_login_required is True
+
+
+def test_settings_reject_unsupported_niche_and_invalid_follower_range():
+    with pytest.raises(ValueError, match="fitness"):
+        Settings(_env_file=None, target_niche="beauty")
+
+    with pytest.raises(ValueError, match="MAX_FOLLOWERS"):
+        Settings(
+            _env_file=None,
+            min_followers=100_000,
+            max_followers=10_000,
+        )
+    assert Settings(
+        _env_file=None,
+        app_env="development",
+        email_mode="gmail",
+        allow_real_email_send=True,
+    ).dashboard_login_required is True

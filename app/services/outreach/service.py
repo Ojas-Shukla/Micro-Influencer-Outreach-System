@@ -59,20 +59,7 @@ def _has_prior_delivery_or_uncertain_attempt(
     db: Session,
     message: OutreachMessage,
 ) -> bool:
-    if message.status in {"sending", "sent", "send_unknown"}:
-        return True
-    prior_attempt = db.scalar(
-        select(OutreachLog.id)
-        .join(OutreachMessage, OutreachLog.message_id == OutreachMessage.id)
-        .where(
-            OutreachMessage.campaign_id == message.campaign_id,
-            OutreachMessage.influencer_id == message.influencer_id,
-            OutreachMessage.channel == message.channel,
-            OutreachLog.event_type.in_(("sent", "send_unknown")),
-        )
-        .limit(1)
-    )
-    return prior_attempt is not None
+    return message.status in {"sending", "sent", "send_unknown"}
 
 
 def _log_duplicate_block(db: Session, message: OutreachMessage) -> None:
@@ -333,6 +320,84 @@ def mark_instagram_dm_sent(
             message_id=message.id,
             event_type="manual_dm_sent",
             details=json.dumps({"channel": "instagram_dm"}),
+        )
+    )
+    db.commit()
+    db.refresh(message)
+    return message
+
+
+def reconcile_delivery(
+    db: Session,
+    message_id: int,
+    *,
+    confirmed_not_sent: bool = False,
+    stale_after_seconds: int = 300,
+    now: datetime | None = None,
+) -> OutreachMessage:
+    message = db.get(OutreachMessage, message_id)
+    if message is None:
+        raise LookupError(f"Outreach message {message_id} was not found.")
+    if message.channel != "email":
+        raise ValueError("Only email delivery attempts can be reconciled.")
+    if message.status not in {"sending", "send_unknown"}:
+        raise ValueError(
+            f"Cannot reconcile an email in '{message.status}' status."
+        )
+
+    reconciliation_time = now or datetime.now(timezone.utc)
+    if message.status == "sending":
+        started = db.scalar(
+            select(OutreachLog.created_at)
+            .where(
+                OutreachLog.message_id == message.id,
+                OutreachLog.event_type == "send_started",
+            )
+            .order_by(OutreachLog.id.desc())
+            .limit(1)
+        )
+        if started is None:
+            raise ValueError(
+                "The delivery has no send-start record; inspect the database "
+                "before changing its status."
+            )
+        if started.tzinfo is None:
+            started = started.replace(tzinfo=timezone.utc)
+        if (reconciliation_time - started).total_seconds() < stale_after_seconds:
+            raise ValueError(
+                "The send attempt is not stale yet; wait before reconciling."
+            )
+        message.status = "send_unknown"
+        db.add(
+            OutreachLog(
+                message_id=message.id,
+                event_type="send_unknown",
+                details=json.dumps(
+                    {
+                        "reason": "stale_send_reconciled",
+                        "retry_blocked": True,
+                    },
+                    sort_keys=True,
+                ),
+            )
+        )
+
+    event_type = "delivery_reconciliation_required"
+    if confirmed_not_sent:
+        message.status = "approved"
+        event_type = "delivery_reconciled_not_sent"
+
+    db.add(
+        OutreachLog(
+            message_id=message.id,
+            event_type=event_type,
+            details=json.dumps(
+                {
+                    "confirmed_not_sent": confirmed_not_sent,
+                    "at": reconciliation_time.isoformat(),
+                },
+                sort_keys=True,
+            ),
         )
     )
     db.commit()

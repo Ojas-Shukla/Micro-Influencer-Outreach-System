@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hmac
+
 import pandas as pd
 import streamlit as st
 
@@ -17,6 +19,7 @@ from app.services.outreach.exceptions import (
     OutreachOutcomeUnknown,
 )
 from dashboard import data
+from dashboard.data import DashboardAPIError
 
 st.set_page_config(
     page_title="Micro-Influencer Outreach",
@@ -27,6 +30,34 @@ st.set_page_config(
 
 def _show_error(error: Exception) -> None:
     st.error(str(error))
+
+
+def _require_dashboard_access() -> bool:
+    settings = get_settings()
+    if not settings.dashboard_login_required:
+        return True
+
+    expected_password = settings.dashboard_login_password
+    if len(expected_password) < 16:
+        st.error(
+            "Dashboard access is locked. Configure "
+            "DASHBOARD_LOGIN_PASSWORD with at least 16 characters."
+        )
+        return False
+    if st.session_state.get("dashboard_authenticated"):
+        return True
+
+    st.subheader("Sign in")
+    with st.form("dashboard_login"):
+        supplied_password = st.text_input("Dashboard password", type="password")
+        submitted = st.form_submit_button("Sign in")
+    if submitted:
+        if hmac.compare_digest(supplied_password, expected_password):
+            st.session_state["dashboard_authenticated"] = True
+            st.rerun()
+        else:
+            st.error("Invalid dashboard password.")
+    return False
 
 
 def _render_discovery() -> None:
@@ -153,11 +184,10 @@ def _render_influencers() -> None:
     else:
         st.info("No profiles match these filters yet. Import or discover creators.")
 
-    export_rows = data.influencers_export_rows()
-    if export_rows:
+    if records:
         st.download_button(
             "Download influencer CSV",
-            data=pd.DataFrame(export_rows).to_csv(index=False).encode("utf-8"),
+            data=data.export_influencers_csv(),
             file_name="influencers.csv",
             mime="text/csv",
         )
@@ -290,7 +320,53 @@ def _render_outreach() -> None:
                 "approved",
                 "dry_run",
                 "failed",
+                "send_unknown",
+                "sending",
             }:
+                if message.status in {"send_unknown", "sending"}:
+                    st.error(
+                        "This delivery may have reached Gmail. Do not retry "
+                        "until you check the sender mailbox."
+                    )
+                    if message.status == "sending":
+                        if st.button(
+                            "Mark stale attempt as uncertain",
+                            key=f"reconcile_{message.id}",
+                        ):
+                            try:
+                                data.reconcile_delivery(message.id)
+                            except (LookupError, ValueError) as exc:
+                                _show_error(exc)
+                            else:
+                                st.warning(
+                                    "Attempt marked uncertain. Check Gmail "
+                                    "before confirming a retry."
+                                )
+                                st.rerun()
+                    else:
+                        confirmed_not_sent = st.checkbox(
+                            "I checked Gmail and confirmed this message was not sent.",
+                            key=f"reconcile_confirm_{message.id}",
+                        )
+                        if st.button(
+                            "Confirm not sent and allow reviewed retry",
+                            key=f"reconcile_{message.id}",
+                            disabled=not confirmed_not_sent,
+                        ):
+                            try:
+                                data.reconcile_delivery(
+                                    message.id,
+                                    confirmed_not_sent=True,
+                                )
+                            except (LookupError, ValueError) as exc:
+                                _show_error(exc)
+                            else:
+                                st.success(
+                                    "Delivery reconciled; email is eligible "
+                                    "for a reviewed retry."
+                                )
+                                st.rerun()
+
                 if message.status in {"approved", "failed"} and st.button(
                     "Record dry run",
                     key=f"dry_run_{message.id}",
@@ -303,37 +379,38 @@ def _render_outreach() -> None:
                         st.success("Dry-run recorded.")
                         st.rerun()
 
-                allow_send = get_settings().gmail_send_enabled
-                confirmed = st.checkbox(
-                    "I reviewed the recipient and approve sending this email.",
-                    key=f"confirm_send_{message.id}",
-                    disabled=not allow_send,
-                )
-                if not allow_send:
-                    st.caption(
-                        "Live sending is disabled. Configure both Gmail opt-in "
-                        "settings to enable it."
+                if message.status not in {"sending", "send_unknown"}:
+                    allow_send = get_settings().gmail_send_enabled
+                    confirmed = st.checkbox(
+                        "I reviewed the recipient and approve sending this email.",
+                        key=f"confirm_send_{message.id}",
+                        disabled=not allow_send,
                     )
-                if st.button(
-                    "Send email",
-                    key=f"send_{message.id}",
-                    disabled=not (allow_send and confirmed),
-                    type="primary",
-                ):
-                    try:
-                        data.send_email(message.id)
-                    except (
-                        LookupError,
-                        ValueError,
-                        DuplicateOutreachError,
-                        OutreachConfigurationError,
-                        OutreachDeliveryError,
-                        OutreachOutcomeUnknown,
-                    ) as exc:
-                        _show_error(exc)
-                    else:
-                        st.success("Email sent and logged.")
-                        st.rerun()
+                    if not allow_send:
+                        st.caption(
+                            "Live sending is disabled. Configure both Gmail opt-in "
+                            "settings to enable it."
+                        )
+                    if st.button(
+                        "Send email",
+                        key=f"send_{message.id}",
+                        disabled=not (allow_send and confirmed),
+                        type="primary",
+                    ):
+                        try:
+                            data.send_email(message.id)
+                        except (
+                            LookupError,
+                            ValueError,
+                            DuplicateOutreachError,
+                            OutreachConfigurationError,
+                            OutreachDeliveryError,
+                            OutreachOutcomeUnknown,
+                        ) as exc:
+                            _show_error(exc)
+                        else:
+                            st.success("Email sent and logged.")
+                            st.rerun()
 
             elif message.channel == "instagram_dm":
                 if message.status == "approved":
@@ -369,9 +446,7 @@ def _render_outreach() -> None:
         )
         st.download_button(
             "Download outreach CSV",
-            data=pd.DataFrame(data.outreach_export_rows()).to_csv(
-                index=False
-            ).encode("utf-8"),
+            data=data.export_outreach_csv(),
             file_name="outreach_history.csv",
             mime="text/csv",
         )
@@ -380,8 +455,9 @@ def _render_outreach() -> None:
 
 
 def main() -> None:
-    data.initialize_database()
     st.title("Micro-Influencer Outreach")
+    if not _require_dashboard_access():
+        return
     st.caption(
         "Discover creators, review personalized messages, and track outreach."
     )
@@ -394,14 +470,17 @@ def main() -> None:
             "Outreach tracker",
         ],
     )
-    if page == "Discovery":
-        _render_discovery()
-    elif page == "Influencers":
-        _render_influencers()
-    elif page == "Messages & review":
-        _render_messages()
-    else:
-        _render_outreach()
+    try:
+        if page == "Discovery":
+            _render_discovery()
+        elif page == "Influencers":
+            _render_influencers()
+        elif page == "Messages & review":
+            _render_messages()
+        else:
+            _render_outreach()
+    except DashboardAPIError as exc:
+        _show_error(exc)
 
 
 if __name__ == "__main__":

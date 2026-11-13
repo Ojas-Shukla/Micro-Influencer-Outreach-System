@@ -1,4 +1,5 @@
 import csv
+from io import StringIO
 from pathlib import Path
 
 from app.repositories.influencer_repository import save_influencers
@@ -110,32 +111,42 @@ def import_csv(file_path: str, db):
     if not path.exists():
         raise FileNotFoundError(f"CSV file not found: {path}")
 
+    return import_csv_content(path.read_bytes(), db)
+
+
+def import_csv_content(content: bytes, db):
+    try:
+        text = content.decode("utf-8-sig")
+    except UnicodeDecodeError as error:
+        raise ValueError("CSV must use UTF-8 encoding") from error
+
     valid_records = []
     errors = []
 
-    with path.open("r", encoding="utf-8-sig", newline="") as file:
-        reader = csv.DictReader(file)
+    reader = csv.DictReader(StringIO(text))
 
-        required_columns = {"platform", "username"}
+    required_columns = {"platform", "username"}
 
-        if not reader.fieldnames or not required_columns.issubset(
-            set(reader.fieldnames)
-        ):
-            raise ValueError("CSV must contain platform and username columns")
+    if not reader.fieldnames or not required_columns.issubset(
+        set(reader.fieldnames)
+    ):
+        raise ValueError("CSV must contain platform and username columns")
 
-        for row_number, row in enumerate(reader, start=2):
-            try:
-                valid_records.append(normalize_row(row))
-            except ValueError as error:
-                errors.append({
-                    "row": row_number,
-                    "error": str(error)
-                })
+    total_rows = 0
+    for row_number, row in enumerate(reader, start=2):
+        total_rows += 1
+        try:
+            valid_records.append(normalize_row(row))
+        except ValueError as error:
+            errors.append({
+                "row": row_number,
+                "error": str(error)
+            })
 
     result = save_influencers(db, valid_records)
 
     return {
-        "total_rows": len(valid_records) + len(errors),
+        "total_rows": total_rows,
         "imported": result["imported"],
         "duplicates": result["duplicates"],
         "invalid": len(errors),

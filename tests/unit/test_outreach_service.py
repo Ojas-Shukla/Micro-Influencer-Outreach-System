@@ -1,4 +1,5 @@
 import json
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from sqlalchemy import create_engine, func, select
@@ -20,6 +21,7 @@ from app.services.outreach.exceptions import (
 from app.services.outreach.service import (
     approve_and_send_email,
     dry_run_outreach_message,
+    reconcile_delivery,
 )
 
 
@@ -228,3 +230,37 @@ def test_instagram_dm_cannot_be_sent_using_gmail(db, approved_email):
 
     with pytest.raises(ValueError, match="Only approved email"):
         approve_and_send_email(db, approved_email.id, StubSender())
+
+
+def test_unexpected_sender_failure_stays_blocked_until_reconciled(
+    db,
+    approved_email,
+):
+    with pytest.raises(RuntimeError, match="connection interrupted"):
+        approve_and_send_email(
+            db,
+            approved_email.id,
+            StubSender(error=RuntimeError("connection interrupted")),
+        )
+
+    assert approved_email.status == "sending"
+    with pytest.raises(DuplicateOutreachError):
+        approve_and_send_email(db, approved_email.id, StubSender())
+
+    marked_uncertain = reconcile_delivery(
+        db,
+        approved_email.id,
+        now=datetime.now(timezone.utc) + timedelta(minutes=10),
+    )
+    assert marked_uncertain.status == "send_unknown"
+
+    confirmed_not_sent = reconcile_delivery(
+        db,
+        approved_email.id,
+        confirmed_not_sent=True,
+    )
+    assert confirmed_not_sent.status == "approved"
+
+    retry = StubSender()
+    assert approve_and_send_email(db, approved_email.id, retry).status == "sent"
+    assert len(retry.calls) == 1
