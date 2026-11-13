@@ -290,3 +290,52 @@ def approve_and_send_email(
     db.commit()
     db.refresh(message)
     return message
+
+
+def mark_instagram_dm_sent(
+    db: Session,
+    message_id: int,
+) -> OutreachMessage:
+    message = db.get(OutreachMessage, message_id)
+    if message is None:
+        raise LookupError(f"Outreach message {message_id} was not found.")
+    if message.channel != "instagram_dm":
+        raise ValueError("Only Instagram DM messages can be marked manually sent.")
+    if not message.approved_at:
+        raise ValueError("The Instagram DM must be approved before marking sent.")
+    if message.status == "sent":
+        _log_duplicate_block(db, message)
+        raise DuplicateOutreachError(
+            "This Instagram DM is already marked as sent."
+        )
+    if message.status not in {"approved", "failed"}:
+        raise ValueError(
+            f"Cannot mark an Instagram DM in '{message.status}' status as sent."
+        )
+
+    claim = db.execute(
+        update(OutreachMessage)
+        .where(
+            OutreachMessage.id == message.id,
+            OutreachMessage.channel == "instagram_dm",
+            OutreachMessage.approved_at.is_not(None),
+            OutreachMessage.status.in_({"approved", "failed"}),
+        )
+        .values(status="sent", sent_at=datetime.now(timezone.utc))
+    )
+    if claim.rowcount != 1:
+        db.rollback()
+        _log_duplicate_block(db, message)
+        raise DuplicateOutreachError(
+            "Another operation has already updated this Instagram DM."
+        )
+    db.add(
+        OutreachLog(
+            message_id=message.id,
+            event_type="manual_dm_sent",
+            details=json.dumps({"channel": "instagram_dm"}),
+        )
+    )
+    db.commit()
+    db.refresh(message)
+    return message
