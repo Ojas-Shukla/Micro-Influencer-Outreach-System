@@ -1,13 +1,12 @@
 import json
-import os
 import re
 from datetime import datetime, timezone
 from email.utils import parseaddr
 
-from dotenv import load_dotenv
 from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
+from app.core.config import get_settings
 from app.db.models import Influencer, OutreachLog, OutreachMessage
 from app.services.outreach.base import GmailSender
 from app.services.outreach.exceptions import (
@@ -142,12 +141,12 @@ def dry_run_outreach_message(db: Session, message_id: int) -> OutreachMessage:
 
 
 def _create_gmail_sender() -> GmailSender:
-    load_dotenv()
-    if os.getenv("EMAIL_MODE", "dry_run").strip().lower() != "gmail":
+    settings = get_settings()
+    if settings.email_mode.strip().lower() != "gmail":
         raise OutreachConfigurationError(
             "Real email is disabled; set EMAIL_MODE=gmail to enable Gmail delivery."
         )
-    if os.getenv("ALLOW_REAL_EMAIL_SEND", "").strip().lower() != "true":
+    if not settings.allow_real_email_send:
         raise OutreachConfigurationError(
             "Real email is disabled; explicitly set ALLOW_REAL_EMAIL_SEND=true."
         )
@@ -155,8 +154,8 @@ def _create_gmail_sender() -> GmailSender:
     from app.services.outreach.gmail_sender import GoogleGmailSender
 
     return GoogleGmailSender(
-        sender=os.getenv("GMAIL_SENDER", ""),
-        token_file=os.getenv("GMAIL_TOKEN_FILE", ""),
+        sender=settings.gmail_sender,
+        token_file=settings.gmail_token_file,
     )
 
 

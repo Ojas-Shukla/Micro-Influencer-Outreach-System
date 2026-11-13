@@ -1,8 +1,12 @@
-MIN_FOLLOWERS = 10_000
-MAX_FOLLOWERS = 100_000
+from app.core.config import get_settings
 
+
+_settings = get_settings()
+
+MIN_FOLLOWERS = _settings.min_followers
+MAX_FOLLOWERS = _settings.max_followers
 TARGET_PLATFORM = "youtube"
-TARGET_NICHE = "fitness"
+TARGET_NICHE = _settings.target_niche.strip().lower()
 
 FITNESS_KEYWORDS = [
     "fitness",

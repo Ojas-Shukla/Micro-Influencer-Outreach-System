@@ -1,10 +1,9 @@
 from __future__ import annotations
 
-import os
-
 import pandas as pd
 import streamlit as st
 
+from app.core.config import get_settings
 from app.services.discovery.youtube_client import YouTubeAPIError
 from app.services.llm.exceptions import (
     LLMConfigurationError,
@@ -304,12 +303,7 @@ def _render_outreach() -> None:
                         st.success("Dry-run recorded.")
                         st.rerun()
 
-                allow_send = (
-                    os.getenv("EMAIL_MODE", "dry_run").lower()
-                    == "gmail"
-                    and os.getenv("ALLOW_REAL_EMAIL_SEND", "").lower()
-                    == "true"
-                )
+                allow_send = get_settings().gmail_send_enabled
                 confirmed = st.checkbox(
                     "I reviewed the recipient and approve sending this email.",
                     key=f"confirm_send_{message.id}",

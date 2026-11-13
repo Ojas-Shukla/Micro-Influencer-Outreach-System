@@ -1,20 +1,14 @@
-import os
 from pathlib import Path
 
-from dotenv import load_dotenv
+from app.core.config import get_settings
 
 GMAIL_SEND_SCOPE = "https://www.googleapis.com/auth/gmail.send"
 
 
 def main() -> None:
-    load_dotenv()
-    client_secrets = os.getenv(
-        "GOOGLE_OAUTH_CLIENT_SECRETS",
-        ".secrets/google-oauth-client.json",
-    )
-    token_path = Path(
-        os.getenv("GMAIL_TOKEN_FILE", ".secrets/gmail-token.json")
-    )
+    settings = get_settings()
+    client_secrets = settings.google_oauth_client_secrets
+    token_path = Path(settings.gmail_token_file)
     if not Path(client_secrets).is_file():
         raise FileNotFoundError(
             "Google OAuth client JSON is missing. Set "

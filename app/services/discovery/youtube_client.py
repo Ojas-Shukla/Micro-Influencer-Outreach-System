@@ -1,8 +1,6 @@
-import os
-from dotenv import load_dotenv
 import httpx
 
-load_dotenv()
+from app.core.config import get_settings
 
 BASE_URL = "https://www.googleapis.com/youtube/v3"
 
@@ -12,7 +10,7 @@ class YouTubeAPIError(Exception):
 
 
 def get_api_key():
-    api_key = os.getenv("YOUTUBE_API_KEY")
+    api_key = get_settings().youtube_api_key
 
     if not api_key:
         raise YouTubeAPIError(
