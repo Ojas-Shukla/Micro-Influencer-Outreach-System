@@ -4,6 +4,8 @@ A local fitness-creator discovery, qualification, message-review, and outreach
 tracking app. The Streamlit dashboard calls the authenticated FastAPI backend;
 the API and dashboard run as two local processes and share a SQLite database.
 
+**Deployed Link** : **https://micro-influencer-outreach-system-xgxsbckqtv9losapphnmqex.streamlit.app/**
+
 ## Implemented
 
 - Import creator records from CSV or discover public YouTube channels through
