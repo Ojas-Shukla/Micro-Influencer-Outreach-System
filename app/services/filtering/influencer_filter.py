@@ -2,6 +2,7 @@ from app.services.filtering.rules import (
     MIN_FOLLOWERS,
     MAX_FOLLOWERS,
     TARGET_PLATFORM,
+    TARGET_NICHE
 )
 
 

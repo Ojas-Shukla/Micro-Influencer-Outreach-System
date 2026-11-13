@@ -1,9 +1,7 @@
-
 MIN_FOLLOWERS = 10_000
 MAX_FOLLOWERS = 100_000
 
 TARGET_PLATFORM = "youtube"
-
 TARGET_NICHE = "fitness"
 
 FITNESS_KEYWORDS = [
@@ -18,4 +16,12 @@ FITNESS_KEYWORDS = [
     "fitness coach",
     "personal trainer",
     "nutrition",
+    "weight loss",
+    "weightlifting",
+    "powerlifting",
+    "calisthenics",
+    "exercise",
+    "fat loss",
+    "yoga",
+    "sports nutrition",
 ]
