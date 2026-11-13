@@ -1,3 +1,4 @@
+import argparse
 import json
 
 from app.db.base import Base
@@ -12,18 +13,36 @@ from app.services.discovery.youtube_client import (
 )
 
 def main():
-    search_query = input("Enter YouTube search query: ") 
+    parser = argparse.ArgumentParser(
+        description="Discover YouTube influencer channels"
+    )
+
+    parser.add_argument(
+        "--query",
+        default="fitness creators India",
+        help="YouTube channel discovery search query"
+    )
+
+    parser.add_argument(
+        "--pages",
+        type=int,
+        default=2,
+        help="Number of search pages (1 to 5)"
+    )
+
+    args = parser.parse_args()
 
     Base.metadata.create_all(bind=engine)
 
-    print(f"Searching YouTube for: {search_query}")
+    print(f"Search query: {args.query}")
+    print(f"Search pages: {args.pages}")
 
     channel_ids = search_channels(
-        query=search_query,
-        max_pages=1
+        query=args.query,
+        max_pages=args.pages
     )
 
-    print(f"Channel IDs discovered: {len(channel_ids)}")
+    print(f"\nChannel IDs discovered: {len(channel_ids)}")
 
     channels = fetch_channel_details(channel_ids)
 
@@ -43,10 +62,13 @@ def main():
     try:
         result = save_influencers(db, influencers)
 
-        print("\nImport result:")
+        print("\nDiscovery report:")
         print(json.dumps({
-            "discovered": len(channel_ids),
-            "details_fetched": len(channels),
+            "search_query": args.query,
+            "pages_requested": args.pages,
+            "channel_ids_discovered": len(channel_ids),
+            "channel_details_received": len(channels),
+            "valid_records": len(influencers),
             **result
         }, indent=4))
 
