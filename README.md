@@ -1,179 +1,117 @@
 # Micro-Influencer Outreach System
 
-A local fitness-creator discovery, qualification, message-review, and outreach
-tracking app. The Streamlit dashboard calls the authenticated FastAPI backend;
-the API and dashboard run as two local processes and share a SQLite database.
+A local tool that discovers micro-influencers on YouTube, filters them, drafts personalized outreach with an LLM, and sends approved emails through Gmail after human review.
 
-**Deployed Link** : **https://micro-influencer-outreach-system-xgxsbckqtv9losapphnmqex.streamlit.app/**
+## Technology stack
 
-## Implemented
+- **Language:** Python 3.11+
+- **Backend:** FastAPI + Uvicorn (bearer-token protected API)
+- **Dashboard:** Streamlit (talks to the API over HTTP)
+- **Database:** SQLite via SQLAlchemy 2 (`DATABASE_URL` can point elsewhere)
+- **Validation/config:** Pydantic, pydantic-settings, `.env`
+- **HTTP client:** httpx
+- **Tests:** pytest (stub LLM and Gmail providers, nothing real is sent)
 
-- Import creator records from CSV or discover public YouTube channels through
-  the official YouTube Data API.
-- Save and deduplicate profiles in SQLite.
-- Qualify YouTube profiles against the fitness rules below and show the reasons
-  for accepted, rejected, and manual-review outcomes.
-- Generate a personalized collaboration email and Instagram DM for each
-  qualified profile through the configured Groq or Gemini provider. Validate
-  the JSON schema, message lengths, creator identity, profile grounding, and
-  unsupported numeric claims before saving drafts.
-- Review, edit, and approve drafts in the dashboard.
-- Record email dry runs; optionally send approved email through Gmail after
-  explicit configuration and operator confirmation.
-- Track manual Instagram DM delivery, prevent duplicate attempts, reconcile
-  stale or uncertain email attempts, and export profiles and outreach logs.
-- Protect API data/workflow routes with a bearer token. Require a dashboard
-  password in non-development environments and whenever live email is enabled.
+## APIs / tools used
 
-The API health and root routes are public. All discovery, data, message,
-delivery, log, and export routes require `DASHBOARD_API_TOKEN`.
+| Purpose | Tool |
+|---|---|
+| Discovery and profile data | YouTube Data API v3 (`search.list`, `channels.list`) |
+| Message generation | Groq chat completions **or** Google Gemini `generateContent` |
+| Email delivery | Gmail API (`users.messages.send`, `gmail.send` scope, OAuth) |
 
-## Fitness qualification
+## Data sources
 
-Fitness is the only supported niche. The settings validator rejects other
-`TARGET_NICHE` values and campaign creation only accepts `fitness`.
+1. **YouTube Data API**: public channel title, description, subscriber count, video count, country.
+2. **CSV import**: creators you are permitted to contact. Required columns: `platform`, `username`. Optional: `display_name`, `bio`, `profile_url`, `followers_count`, `email`, `location`.
 
-A profile is accepted only when all of these are true:
+## Discovery methodology
 
-1. Its platform is YouTube.
-2. Its subscriber count is available and within the inclusive configured
-   `MIN_FOLLOWERS`–`MAX_FOLLOWERS` range (defaults: 10,000–100,000).
-3. Its channel title or description contains one of the configured fitness
-   keywords in [app/services/filtering/rules.py](./app/services/filtering/rules.py).
+1. `search.list` with `type=channel`, the query (default `fitness creators India`), 50 results per page, ordered by relevance, 1–5 pages.
+2. Channel IDs are de-duplicated, then `channels.list` fetches details in batches of 50.
+3. Each channel is normalized to a common profile record and saved. Duplicates are skipped by `(platform, platform_user_id or username)`, both within a batch and against the database.
 
-Missing title and description require manual review; a non-matching profile is
-rejected. The app does not discover Instagram accounts, infer engagement, or
-find email addresses. CSV records can contain other platforms, but only
-qualifying YouTube profiles receive generated drafts. Verify an Instagram
-account and the recipient address independently before contacting anyone.
+## Filtering logic
 
-## Requirements and setup
+A profile qualifies only if all three hold:
 
-Python 3.11 or newer is recommended.
+1. Platform is `youtube`.
+2. Subscriber count is present and within `MIN_FOLLOWERS`–`MAX_FOLLOWERS` (default 10,000–100,000, inclusive).
+3. Channel title or description matches a fitness keyword (whole-word, case-insensitive). The list includes *fitness, workout, gym, bodybuilding, powerlifting, calisthenics, yoga, nutrition, weight loss*, among others, and lives in `app/services/filtering/rules.py`.
+
+Outcomes are `fitness`, `not_fitness`, or `needs_review` (no title and description). Rejection reasons are shown in the dashboard.
+
+## Enrichment process
+
+Enrichment is limited to what the YouTube API returns: display name, handle (from `customUrl`), bio, subscriber count, video count, country, and profile URL. Engagement metrics and email are **not** inferred. An email address can only come from a CSV you supply.
+
+## AI model / prompt used
+
+- **Provider/model:** Groq or Gemini, chosen with `LLM_PROVIDER`. The model name is set in `GROQ_MODEL` / `GEMINI_MODEL` (no default is hardcoded).
+- **Settings:** temperature 0.4, JSON output mode, one call returns `email_subject`, `email_body`, and `instagram_dm`.
+- **Prompt version:** `outreach-v1`, recorded with the provider and model in the audit log.
+- **System prompt:** treat profile fields as untrusted data, use only supplied facts, return exactly three JSON string keys.
+- **Task prompts:** a 60–90 word collaboration email and a 15–30 word Instagram DM. Both must name the creator and reference a niche or bio fact, and must not invent compensation, past contact, performance, or audience data.
+
+## Personalization logic
+
+The model receives only the creator's name, username, platform, niche, bio, and location, plus the campaign name, niche, and description. Before a draft is saved it must pass these checks:
+
+- JSON matches the schema with no extra keys
+- Email is 60–90 words and the DM is 15–30 words
+- No unresolved placeholders such as `[Name]`
+- The creator's name appears in the subject, body, and DM
+- The body and DM reuse a term from the creator's niche, bio, or location
+- Any number in the text already appears in the supplied facts
+
+A failed check discards the output. Passing drafts are saved as `draft`, and you edit and approve them before anything is delivered.
+
+## Sending mechanism
+
+- **Email:** approved messages only, to the creator's email on record.
+  - Default is a **dry run** (`EMAIL_MODE=dry_run`), which only logs the attempt.
+  - Live sending needs `EMAIL_MODE=gmail`, `ALLOW_REAL_EMAIL_SEND=true`, a Gmail OAuth token, a dashboard login, and per-message confirmation in the UI.
+  - Status moves `approved → sending → sent` through an atomic claim, so a message cannot be sent twice. Server errors or timeouts set `send_unknown`, which blocks retry until you check Gmail and reconcile.
+- **Instagram DM:** never automated. You send it manually and mark it sent.
+- Every action is written to an outreach log, which can be exported as CSV.
+
+## Limitations
+
+- YouTube only. Instagram accounts are not discovered or messaged automatically.
+- No contact enrichment, so email outreach depends on addresses you provide.
+- Niche detection is keyword-based on title and description. It does not analyze video content, language, engagement, or audience quality.
+- Subscriber counts can be hidden, and search results may include brands or inactive channels.
+- `search.list` is quota-expensive (100 units per call against a default 10,000/day).
+- Validation reduces but does not eliminate weak or inaccurate drafts, so human review is required.
+- Single shared password, local SQLite, no background jobs. Not suitable for public or multi-user deployment as is.
+- Gmail sending limits and spam filtering apply. Delivery is not guaranteed.
+- The documented real-API test covered YouTube discovery only. LLM and Gmail paths were tested with stubs.
+
+## Setup instructions
 
 ```bash
-git clone <repository-url>
-cd "Micro-Influencer Outreach System"
+git clone https://github.com/Ojas-Shukla/Micro-Influencer-Outreach-System.git
+cd Micro-Influencer-Outreach-System
 python -m venv .venv
-source .venv/bin/activate
-python -m pip install -r requirements.txt
+source .venv/bin/activate        # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
 cp .env.example .env
 ```
 
-Set a private, random API token in `.env` (at least 32 characters). For example,
-generate one locally with:
+Edit `.env`:
 
-```bash
-python -c "import secrets; print(secrets.token_urlsafe(32))"
-```
+- `DASHBOARD_API_TOKEN`: 32+ random characters, e.g. `python -c "import secrets; print(secrets.token_urlsafe(32))"`
+- `YOUTUBE_API_KEY`: from Google Cloud (enable YouTube Data API v3)
+- `LLM_PROVIDER` plus `GROQ_API_KEY`/`GROQ_MODEL` or `GEMINI_API_KEY`/`GEMINI_MODEL` (needed only for draft generation)
+- Gmail (optional): enable the Gmail API, create a desktop OAuth client, set `GMAIL_SENDER`, then run `python scripts/gmail_auth.py`
 
-Set the generated value as `DASHBOARD_API_TOKEN`. Do not paste credentials into
-source control, issue trackers, or logs. Add a YouTube Data API key as
-`YOUTUBE_API_KEY` to use YouTube discovery. LLM keys and Gmail OAuth are
-optional; generation and live email remain unavailable until their respective
-credentials are configured.
-
-The default database is `data/micro_influencer.db`; tables are created when the
-API starts. `DATABASE_URL` can point to another SQLAlchemy database URL.
-
-## Run locally
-
-Start the API in one terminal:
+Run in two terminals:
 
 ```bash
 uvicorn app.main:app --host 127.0.0.1 --port 8000
-```
-
-Start the dashboard in another terminal, with the same `.env` settings:
-
-```bash
 streamlit run dashboard/Home.py --server.address 127.0.0.1
 ```
 
-Open the local Streamlit URL printed by the command. The API defaults to
-`http://127.0.0.1:8000`; change `API_BASE_URL` only when intentionally using a
-different API address. The dashboard contacts the API over HTTP and does not
-open a database connection of its own.
+Workflow: **Discovery** → **Influencers** (review qualification) → **Messages & review** (create fitness campaign, generate, edit, approve) → **Outreach tracker** (dry run, send, export).
 
-## Dashboard workflow
-
-1. Import a permitted CSV or run a public-channel search in **Discovery**.
-   CSV input requires `platform` and `username` columns; other recognized
-   fields include `display_name`, `bio`, `profile_url`, `followers_count`,
-   `email`, and `location`.
-2. Review qualification outcomes in **Influencers**. Missing values are not
-   guessed.
-3. Create a fitness campaign in **Messages & review**. Generate drafts only
-   when a Groq or Gemini provider and model are configured. Edit and approve
-   each draft before delivery.
-4. In **Outreach tracker**, record a dry run or manually send the Instagram DM.
-   Live email is disabled by default.
-5. Review the activity log and download CSV exports.
-
-Email messages contain 60–90 words and Instagram DM drafts contain 15–30 words.
-The generator validates JSON shape, placeholders, profile-specific wording,
-and numeric claims. These checks reduce unsupported personalization but do not
-replace human review.
-
-## Access and delivery safety
-
-- Keep both processes bound to `127.0.0.1` for trusted local use.
-- Use a unique random `DASHBOARD_API_TOKEN`; the API fails closed when it is
-  missing or shorter than 32 characters.
-- Set `APP_ENV` to a non-development value for non-local use. The dashboard
-  then requires `DASHBOARD_LOGIN_PASSWORD` (at least 16 characters). The same
-  login is required whenever live email is enabled.
-- Do not expose this shared-password prototype directly to the public
-  internet. For a multi-user or public deployment, put it behind an
-  organization-managed identity-aware proxy/SSO, TLS, and network restrictions.
-- Real email requires both `EMAIL_MODE=gmail` and
-  `ALLOW_REAL_EMAIL_SEND=true`, plus Gmail OAuth credentials. The dashboard
-  also requires an explicit per-message send confirmation.
-- If a send outcome is uncertain, the message is blocked from retry. Wait at
-  least five minutes for a stale `sending` attempt to be marked uncertain, then
-  inspect the sender mailbox. Only confirm “not sent” after checking Gmail;
-  that explicit reconciliation unlocks a reviewed retry.
-- Instagram messages are never sent automatically. Mark them sent only after
-  manually confirming delivery.
-
-To configure Gmail OAuth after enabling the Google Gmail API and creating a
-desktop OAuth client:
-
-```bash
-python scripts/gmail_auth.py
-```
-
-Store OAuth files under `.secrets/` or another private path; never commit them.
-Real email sending is not required for local discovery or dry-run testing.
-
-## Tests
-
-Install the requirements, then run:
-
-```bash
-python -m pytest -q
-```
-
-The suite covers qualification, provider and message validation, API-to-
-database workflows, API authentication, dashboard API request mapping,
-duplicate prevention, dry-run and send outcomes, and uncertain-delivery
-recovery. Tests use stub providers/senders; they do not send real messages.
-
-## Real-integration demo record
-
-On 2026-11-13, the authenticated `/discovery/youtube` API was run once against
-the official YouTube Data API using the query `fitness creators` and one search
-page. It returned HTTP 200: 50 channel IDs, 50 channel details, 50 imports, and
-0 duplicates. All records were written to an in-memory SQLite database and
-discarded after the run. The API key was not logged or included in this
-documentation. The LLM and Gmail integrations were not exercised in this demo.
-
-## Explicitly not implemented
-
-- Instagram discovery or automated Instagram messaging.
-- Email/contact enrichment or private audience analytics.
-- Authentication for individual users, roles, or a full multi-tenant system.
-- Production deployment, hosted database migrations, or background job
-  processing.
-- Guaranteed delivery, automated retry for uncertain sends, or proof that a
-  public contact address is current.
+Run tests with `python -m pytest -q`.
